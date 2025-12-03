@@ -1,5 +1,7 @@
 # Survival Analysis: Stomach Cancer
-This project involves conducting a survival analysis of stomach cancer, using gene expression data from the TCGA database. Various survival analysis techniques were employed, including:
+This project involves conducting a survival analysis of stomach cancer, using gene expression data from the TCGA database. This project was completed as part of a National Science Foundation Research Experience for Undergraduates (NSF REU) at the University of California, Riverside.
+
+Various survival analysis techniques were employed, including:
 
 1) Kaplan-Meier (KM) Estimation
 2) Cox Proportional Hazards (CPH)
