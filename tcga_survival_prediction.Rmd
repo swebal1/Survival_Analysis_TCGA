@@ -1,0 +1,487 @@
+---
+title: "Week 6 TCGA Analysis"
+author: "Sweta Balaji"
+date: "2024-07-22"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Load, Clean, and Combine Datasets
+
+```{r}
+setwd("C:/Users/sweta/OneDrive - Emory University/NSF REU UCR/Project")
+library(dplyr)
+library(tidyr)
+
+#combined data without solid tissue normal samples
+data<-read.csv("primary_tumor_dataset.csv")
+```
+
+
+## Survival Analysis
+
+### Load Libraries
+
+```{r}
+#Survival Analysis
+library(survival) #for survival analysis
+library(survminer) #for plot
+library(ggfortify)
+library(ranger)
+```
+
+### Clean data for survival analysis
+
+```{r}
+#save data separately for survival analysis
+surv<-data
+
+#Add DSS_month and DSS_year as a variables from DSS.time
+surv<-mutate(surv,DSS_month=DSS.time/30,DSS_year=DSS.time/365)
+
+#Add DFI_month and DFI_year as a variables from DFI.time
+surv<-mutate(surv,DFI_month=DFI.time/30,DFI_year=DFI.time/365)
+```
+
+```{r}
+#gene expression columns
+gene_columns <- 2:20531
+gene_data <- sapply(surv[, gene_columns], as.numeric) #convert all columns to numeric
+
+#calculate median expression for each column (column = 2)
+median <- apply(gene_data, 2, median)
+
+#recode gene expressions based on median threshold
+recode <- as.data.frame(t(apply(gene_data, 1, function(x) ifelse(x >= median, 1, 0)))) # 1 if equal to or above median, 0 if below median
+
+recode$DSS.time <- surv$DSS.time
+recode$DSS <- surv$DSS
+
+#remove genes with any NA values except for DSS.time and DSS columns
+recode <- recode %>% select(where(~ !any(is.na(.))) | one_of("DSS.time", "DSS"))
+
+#remove genes with low variation (not enough 0s or), excluding the last 2 columns (DSS and DSS.time)
+valid_genes <- names(recode)[1:(ncol(recode) - 2)]
+unique_counts <- sapply(valid_genes, function(gene) length(unique(recode[[gene]])))
+
+valid_genes <- valid_genes[unique_counts >= 2]
+
+recode <- recode[, c(valid_genes, names(recode)[(ncol(recode)-1):ncol(recode)])]
+
+#remove genes with less than 200 samples
+max_size<-200
+size <- sapply(valid_genes, function(gene) sum(!is.na(recode[[gene]])))
+valid_genes <- valid_genes[size >= max_size]
+
+recode <- recode[, c(valid_genes, names(recode)[(ncol(recode)-1):ncol(recode)])]
+
+#remove genes with more than a difference of 10 samples between groups
+
+min_diff<-10
+valid_genes <- valid_genes[sapply(valid_genes, function(gene) {
+  gene_values<-recode[[gene]]
+  count_zero<- mean(gene_values==0, na.rm=TRUE)
+  count_one<-mean(gene_values==1, na.rm=TRUE)
+  return(abs(count_zero-count_one)< min_diff)
+})]
+
+recode <- recode[, c(valid_genes, names(recode)[(ncol(recode)-1):ncol(recode)])]
+```
+
+After cleaning, there are 17969 total genes
+
+
+### Survival Analysis 
+
+```{r}
+#survival analysis function, calculates log rank p-value
+survival_analysis <- function(gene, dss_time, dss) {
+  fit <- survfit(Surv(dss_time, dss) ~ gene) #fit survival function
+  log_rank <- survdiff(Surv(dss_time, dss) ~ gene) #log rank test to compare survival distribution of groups
+  p_value <- 1 - pchisq(log_rank$chisq,  length(log_rank$n) - 1)
+  return(p_value)
+} #calculates p-value from chisquared statistics
+
+#calculate p-values for each valid gene
+#tryCatch to catch errors when executing survival analysis rather than stopping the analysis process.
+p_values <- sapply(valid_genes, function(gene) {
+  tryCatch({
+    survival_analysis(recode[[gene]], recode$DSS.time, recode$DSS)
+  }, error = function(e) {
+    cat("Error for gene:", gene, ":", e$message, "\n")
+    return(NA)
+  })
+})
+
+#filter
+valid_p_values <- p_values[!is.na(p_values)]
+
+#add adjusted p-value, using Benjamini-Hochberg and Bonferroni methods
+bh_p_values <- p.adjust(valid_p_values, method = "BH")
+
+#combine p-values into a dataframe
+result<-data.frame(Gene = valid_genes[!is.na(p_values)], 
+                      P_Value = valid_p_values, 
+                      BH_P_Value = bh_p_values)
+#arrange dataframe from most to least significant based on BH estimate
+head(arrange(result,bh_p_values,descending=FALSE))
+
+```
+
+
+### Kaplan Meier Curve
+
+#### Selected gene with lowest p-value: PRTG
+
+```{r}
+surv$PRTG_f<-ifelse(surv$PRTG >=median(as.numeric(surv$PRTG )),"High PRTG Expression","Low PRTG Expression")
+
+plot<-survfit(formula=Surv(DSS_year,DSS)~PRTG_f,data=surv)
+ggsurvplot(plot,data=surv,surv.median.line="hv",legend.title="",legend.labs=c("High PRTG Expression","Low PRTG Expression"),xlab="Years",ylab="Survival Probability",title="Disease Specific Survival of Stomach Cancer by PRTG Gene Expression",pval=TRUE,risk.table=TRUE) #kaplan-meier plot
+```
+
+
+### Cox Proportional Hazards Model
+
+#### Run Iteratively on each Individual Gene along with covariates - Only on significant Genes (BH Adjusted P-values)
+
+```{r}
+#convert recode dataset into a numeric
+sig_gene <- filter(result, BH_P_Value <= 0.05)# based on BH adjusted p-value
+recode_sig <- recode[, colnames(recode) %in% sig_gene$Gene] # choose genes among significant genes
+recode_sig$DSS <- recode$DSS
+recode_sig$DSS.time <- recode$DSS.time # add DSS and DSS.time as variables along with the genes
+
+#convert recode dataset into a numeric
+recode_sig<-data.frame(lapply(recode_sig,function(x) as.numeric(as.character(x))))
+
+surv_obj <- Surv(recode_sig$DSS.time, recode_sig$DSS)
+
+#add covariates
+recode_sig$age_at_initial_pathologic_diagnosis<-data$age_at_initial_pathologic_diagnosis
+
+recode_sig$histological_type<-data$histological_type
+
+recode_sig$pathologic_stage<-data$pathologic_stage
+
+#empty list to store the results
+coxph_results <- list()
+
+#store genes and p-values
+gene_names <- c()
+p_values <- c()
+results <- list()
+
+for (i in 1:36) { # choose columns with genes
+  column_name <- colnames(recode_sig)[i]
+  formula <- as.formula(paste("surv_obj ~", column_name, "+ age_at_initial_pathologic_diagnosis + histological_type + pathologic_stage"))
+  coxph_fit <- coxph(formula, data = recode_sig)
+  summary_fit <- summary(coxph_fit)
+ coefficients <- summary_fit$coefficients
+  results[[column_name]] <- data.frame(
+    variable = rownames(coefficients),
+    coef = coefficients[, "coef"],
+    exp_coef=coefficients[,"exp(coef)"],
+    se_coef = coefficients[, "se(coef)"],
+    z = coefficients[, "z"],
+    p_value = coefficients[, "Pr(>|z|)"]
+  )
+}
+
+do.call(rbind, lapply(names(results), function(x) {
+  df <- results[[x]]
+  df$gene <- x
+  return(df)
+})) #bind into a dataframe
+```
+
+## Atempting Predictive Model
+
+Goal: How can we use gene expression level to predict disease specific survival time?
+
+### Random Survival Forest
+Similar to random forests, but meant for survival prediction
+
+#### Clean Data
+
+```{r}
+library(randomForestSRC)
+
+#choose genes from recode (cleaned)
+common <- intersect(names(surv), names(recode))
+rfs_data <- subset(surv,select=common)
+
+#add DSS and DSS.time
+rfs_data$DSS<-surv$DSS
+rfs_data$DSS.time<-surv$DSS.time
+```
+
+#### Split Testing and Training Data
+70% in training data, 30% in testing
+
+```{r}
+set.seed(123)
+rfs_data<-na.omit(rfs_data)
+sample_index <- sample(seq_len(nrow(rfs_data)), size = 0.7 * nrow(rfs_data))
+train<- rfs_data[sample_index, ]
+test<- rfs_data[-sample_index, ]
+
+#recode data
+set.seed(123)
+recode<-na.omit(recode)
+sample_index <- sample(seq_len(nrow(recode)), size = 0.7 * nrow(recode))
+train<- recode[sample_index, ]
+test<- recode[-sample_index, ]
+
+```
+
+
+#### Random Survival Forest on Training Data
+
+```{r} 
+#model
+rfs<-rfsrc(Surv(DSS.time,DSS)~.,data=train,ntree=100, importance=TRUE)
+rfs
+```
+
+#### Calculate C-Index on Training Data
+
+```{r}
+library(survcomp)
+predicted_risk<-predict(rfs, newdata=na.omit(train))$predicted
+(concordance.index(predicted_risk, train$DSS.time, train$DSS))$c.index
+```
+
+
+#### Perform on Testing data
+
+```{r}
+predict(rfs,newdata= test)
+```
+
+
+#### Calculate C-Index on Testing Data
+
+
+```{r}
+predicted_risk<-predict(rfs, newdata=na.omit(test))$predicted
+(concordance.index(predicted_risk, test$DSS.time, test$DSS))$c.index
+```
+
+
+#### Hyperparameter Tuning
+
+Tune hyperparameters using cross-validation.
+
+```{r}
+# Define a grid of values to search over
+tune_grid <- expand.grid(mtry = c(10, 20, 50), ntree = c(100, 200, 500))
+
+# Function to evaluate the model
+evaluate_model <- function(train_data, mtry, ntree) {
+  set.seed(123)
+  tryCatch({
+    rfs <- rfsrc(Surv(DSS.time, DSS) ~ ., data = train_data, mtry = mtry, ntree = ntree, nfold = 5)
+    mean(rfs$err.rate, na.rm = TRUE)
+  }, error = function(e) {
+    return(NA)
+  })
+}
+
+# Manual grid search
+best_mtry <- NULL
+best_ntree <- NULL
+best_score <- Inf
+
+for (i in 1:nrow(tune_grid)) {
+  mtry <- tune_grid$mtry[i]
+  ntree <- tune_grid$ntree[i]
+  
+  score <- evaluate_model(train, mtry, ntree)
+  
+  if (!is.na(score) && score < best_score) {
+    best_score <- score
+    best_mtry <- mtry
+    best_ntree <- ntree
+  }
+}
+```
+
+
+
+# Train model with tuned hyperparameters
+
+```{r}
+set.seed(123)
+rfs_tuned <- rfsrc(Surv(DSS.time, DSS) ~ ., data = train, mtry = best_mtry, ntree = best_ntree,importance=TRUE)
+rfs_tuned
+```
+
+
+#### Calculate C-Index on Training Data (after hyperparameter tuning)
+
+```{r}
+predicted_risk<-predict(rfs_tuned, newdata=train)$predicted
+(concordance.index(predicted_risk, train$DSS.time, train$DSS))$c.index
+```
+
+#### Predict on the Test Data after tuning
+
+
+```{r}
+predict(rfs_tuned,newdata= test)
+```
+
+
+#### C-Index on Test Data after tuning
+
+```{r}
+predicted_risk<-predict(rfs_tuned, newdata=test)$predicted
+(concordance.index(predicted_risk, test$DSS.time, test$DSS))$c.index
+```
+
+
+#### Variable Importance
+
+Top 50 genes based on importance scores
+
+```{r}
+importance_scores<-rfs_tuned$importance
+names(importance_scores)[order(importance_scores, decreasing = TRUE)[1:5]]
+```
+
+
+#### Plot Important Genes
+
+```{r}
+importance_df<-data.frame(
+  Gene = names(importance_scores),
+  Importance = importance_scores
+)
+
+ggplot(importance_df[order(importance_df$Importance, decreasing = TRUE)[1:5], ], aes(x = reorder(Gene, Importance), y = Importance,fill=Gene)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Gene", y = "Importance", title = "Top Genes in Random Survival Forest")+
+  theme(legend.position="none")
+
+```
+
+#### Cox PH on top genes
+
+```{r}
+surv$ARMCX1_f<-ifelse(surv$ARMCX1 >=median(as.numeric(surv$ARMCX1 )),"High ARMCX1 Expression","Low ARMCX1 Expression")
+
+coxph(Surv(DSS.time, DSS) ~ OSBPL9_f, data = surv)
+
+```
+
+
+#### Visualizing through Partial Dependent Plot
+
+```{r}
+library(rpart)
+library(rpart.plot)
+test <- test[test$DSS.time > 0, ]
+#top 5 important gene based on importance scores
+important_genes <- c("OSBPL9", "C2orf82", "C16orf68", "POTEF", "ARMCX1") 
+
+#fit tree on top genes
+tree <- rpart(Surv(DSS.time, DSS) ~ ., data = test[, c(important_genes, "DSS", "DSS.time")], method = "exp")
+
+#plot tree
+rpart.plot(tree)
+```
+
+
+#### Survival Curves for top genes
+
+```{r}
+plot<-survfit(formula=Surv(DSS_year,DSS)~OSBPL9_f,data=surv)
+ggsurvplot(plot,data=surv,surv.median.line="hv",legend.title="",legend.labs=c("High OSBPL9 Expression","Low OSBPL9 Expression"),xlab="Years",ylab="Survival Probability",title="Disease Specific Survival of Stomach Cancer by OSBPL9 Gene Expression",risk.table=TRUE) #kaplan-meier plot
+
+```
+
+
+### Stacking: combining RSF and Cox PH
+
+
+### Dimensionality Reduction - Principal Component Analysis
+
+We are using PCA as a form of dimensionality reduction here to select genes that may capture the most variance of our original data and potentially be the most predictive of disease specific survival time.
+
+Note: PCA is conducted on the raw gene expression values (scaled) and not on the recoded data with 1s and 0s.
+
+```{r}
+#load libraries
+library(factoextra)
+```
+
+
+#### Conduct PCA
+```{r}
+#conduct pca on genes specified in survival analysis
+pca_data<-surv
+common <- intersect(names(pca_data), names(recode))
+pca_data <- pca_data[, common]
+pca_data<-pca_data[,-(17970:17971)]
+
+#convert to numeric
+pca_data <- as.data.frame(lapply(pca_data, function(x) as.numeric(as.character(x))))
+
+#scale the gene expression data
+scaled <- scale(pca_data)
+
+#conduct PCA
+pca_result<-prcomp(scaled, center = TRUE, scale. = TRUE)
+
+summary(pca_result)
+```
+
+The first principal component appears to explain about 12% of the variance in the original data.
+
+
+#### Find Loading Scores (coefficients)
+
+```{r}
+#PCA loading scores 
+loading_score <- pca_result$rotation
+loading_score_pc1<-pca_result$rotation[,1]
+```
+
+
+#### Use PCA to select genes
+
+I am summing up the absolute values of the loading scores from the genes from the first 3 PCs to come up with a ranking of genes in order of their cumulative loading scores.
+
+First 3 PCs were chosen to comprise a lot of variance of the original dataset.
+
+```{r}
+#get loading scores from first 3 PCs
+loading_scores <- as.data.frame(pca_result$rotation[, 1:3])
+
+#sum the absolute values of the PCs
+loading_score_sum <- apply(loading_scores, 1, function(x) sum(abs(x)))
+
+#create dataframe
+ls_df<-data.frame(Gene=rownames(loading_scores), `Loading Score Sum` = loading_score_sum)
+
+#select top 100 genes
+top_genes_pca<-head((ls_df[order(-ls_df$Loading.Score.Sum), ]),100)
+```
+
+
+#### Select genes based on their statistical significance
+
+
+```{r}
+#specify recode dataframe to only include genes from PCA 
+recode_pca<-recode[,top_genes_pca$Gene]
+recode_pca$DSS<-recode$DSS
+recode_pca$DSS.time<-recode$DSS.time
+```
