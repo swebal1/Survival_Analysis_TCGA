@@ -1,5 +1,5 @@
 # Survival Analysis: Stomach Cancer
-This project involves conducting a survival analysis of stomach cancer, using gene expression data from the TCGA database. This project was completed as part of a National Science Foundation Research Experience for Undergraduates (NSF REU) at the University of California, Riverside.
+This project involves conducting a survival analysis of stomach cancer, using gene expression data from the TCGA database. This was completed as part of a National Science Foundation Research Experience for Undergraduates (NSF REU) at the University of California, Riverside.
 
 Various survival analysis techniques were employed, including:
 
@@ -7,8 +7,7 @@ Various survival analysis techniques were employed, including:
 2) Cox Proportional Hazards (CPH)
 3) Random Survival Forest (RSF): identifying top predictors of stomach cancer, out of 20,000 genes.
 
-All code was done in R and is available in the file, "tcga_survival_analysis.R"
-
+All code was done in R.
 
 ### Data
 Data were derived from the the stomach cancer cohort in the TCGA database. The following three data sets were used:
@@ -41,7 +40,7 @@ Code is included in "tcga_prelim_analysis.R"
 ##### Disease Specific Survival of Stomach Cancer by PRTG Gene Expression
 <img width="1279" height="814" alt="prtg" src="https://github.com/user-attachments/assets/74ae393e-abf4-4c5a-8acd-518b11e42291" />
 
-There appeared to be a statistically significant association between PRTG gene expression and disease specific survival, with high PRTG gene expression associated with poorer survival. Similar curves were created to analyze the relationship between different genes and stomach cancer prognosis. 
+There appeared to be a statistically significant association between PRTG gene expression and disease specific survival, with high PRTG gene expression associated with poorer survival. Similar curves were created to analyze the association between different genes and stomach cancer prognosis. 
 
 #### Cox Proportional Hazards: PRTG Gene Expression
 <img width="633" height="318" alt="prtg_cox" src="https://github.com/user-attachments/assets/815fcc5d-c649-4340-8d6b-abe13a6cbc99" />
@@ -66,7 +65,7 @@ We next aimed to understand how gene expression could predict disease specific s
 The top five genes obtained from the iterative CPH analysis were used to visualize a decision tree in the RSF model.
 <img width="508" height="420" alt="decisiontree" src="https://github.com/user-attachments/assets/6758bc6c-6c5b-4165-91f7-6bf6729509ef" />
 
-Code is included in "tcga_survival_prediction.Rmd" Used package randomforestSRC for RSF analyses
+Code is included in "tcga_survival_prediction.Rmd" We used the randomforestSRC package for the RSF analysis. 
 
 ### Sources
 Xiang T, Yuan C, Guo X, et al. The novel ZEB1-upregulated protein PRTG induced by Helicobacter pylori infection promotes gastric carcinogenesis through the cGMP/PKG signaling pathway. Cell Death Dis. 2021;12(2):150. doi:10.1038/s41419-021-03440-1
